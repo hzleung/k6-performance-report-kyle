@@ -1,0 +1,10 @@
+{
+  "name": "k6-performance-testing",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "docker run -i --rm -v $PWD:/app -w /app grafana/k6 run test.js > result.jsonl",
+    "report": "node generateReport.js"
+  },
+  "dependencies": {}
+}
