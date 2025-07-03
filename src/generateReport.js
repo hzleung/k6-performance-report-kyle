@@ -1,128 +1,165 @@
+// generateReport.js
 import fs from 'fs';
+import readline from 'readline';
+import path from 'path';
 
-const lines = fs.readFileSync('./result.jsonl', 'utf-8').trim().split('\n');
-const records = lines.map(line => JSON.parse(line));
+const logFile = 'results.json'; // k6 --out json=results.json
+const outputHtml = 'report.html';
 
-const apiStats = {};
-const errors = [];
+const records = [];
 
-for (const record of records) {
-  const key = record.apiName;
+async function parseJsonLines() {
+  const rl = readline.createInterface({
+    input: fs.createReadStream(logFile),
+    crlfDelay: Infinity
+  });
 
-  if (!apiStats[key]) {
-    apiStats[key] = {
-      name: key,
-      method: record.method,
-      url: record.url,
-      durations: [],
-      vus: [],
-      statuses: [],
-    };
-  }
-
-  apiStats[key].durations.push(record.duration);
-  apiStats[key].vus.push(record.vu);
-  apiStats[key].statuses.push(record.status);
-
-  if (record.error) {
-    errors.push({
-      ...record,
-      errorCode: record.error.code,
-      errorMessage: record.error.message,
-    });
+  for await (const line of rl) {
+    if (!line.trim()) continue;
+    try {
+      const json = JSON.parse(line);
+      if (json.type === 'Point' && json.metric === 'http_req_duration') {
+        const tags = json.data.tags;
+        records.push({
+          name: tags.name || 'unknown',
+          method: tags.method,
+          url: tags.url,
+          status: tags.status || 'unknown',
+          duration: json.data.value, // in ms
+          uvs: parseInt(tags.vu) || 0,
+          error: tags.error || null
+        });
+      }
+    } catch (err) {
+      console.error('解析失败:', err.message);
+    }
   }
 }
 
-const html = `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <title>K6 Performance Report</title>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <style>
-    body { font-family: sans-serif; padding: 20px; }
-    .chart-container { width: 100%; max-width: 800px; margin: 30px auto; }
-    table { border-collapse: collapse; width: 100%; margin-top: 40px; }
-    th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }
-    th { background: #f0f0f0; }
-  </style>
-</head>
-<body>
-  <h1>K6 Performance Report</h1>
-  ${Object.values(apiStats).map(api => `
-    <div class="chart-container">
-      <h2>${api.name} (${api.method})</h2>
-      <p><strong>URL:</strong> ${api.url}</p>
-      <canvas id="chart-${api.name}-duration"></canvas>
-      <canvas id="chart-${api.name}-vu"></canvas>
-    </div>
-  `).join('')}
+function groupByApi(records) {
+  const grouped = {};
 
-  <h2>❌ Error List</h2>
-  <table>
-    <thead>
+  for (const rec of records) {
+    const key = `${rec.method} ${rec.url}`;
+    if (!grouped[key]) {
+      grouped[key] = {
+        name: rec.name,
+        method: rec.method,
+        url: rec.url,
+        count: 0,
+        durations: [],
+        errors: [],
+      };
+    }
+    grouped[key].count += 1;
+    grouped[key].durations.push(rec.duration);
+    if (rec.status !== '200') {
+      grouped[key].errors.push({
+        status: rec.status,
+        error: rec.error || 'Unknown error',
+        duration: rec.duration
+      });
+    }
+  }
+
+  return grouped;
+}
+
+function generateHtml(grouped) {
+  const chartJsCdn = `<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>`;
+  const rows = Object.entries(grouped).map(([key, data], index) => {
+    const avg = (data.durations.reduce((a, b) => a + b, 0) / data.durations.length).toFixed(2);
+    const errorBlock = data.errors.length
+      ? `<details><summary>${data.errors.length} error(s)</summary><pre>${data.errors.map(e => JSON.stringify(e, null, 2)).join('\n\n')}</pre></details>`
+      : '✅ No errors';
+
+    return `
       <tr>
-        <th>VU</th><th>Scenario</th><th>Page</th><th>API</th><th>Status</th><th>URL</th><th>Code</th><th>Message</th>
+        <td>${data.name}</td>
+        <td>${data.method}</td>
+        <td>${data.url}</td>
+        <td>${data.count}</td>
+        <td>${avg} ms</td>
+        <td>${errorBlock}</td>
       </tr>
-    </thead>
-    <tbody>
-      ${errors.map(e => `
-        <tr>
-          <td>${e.vu}</td>
-          <td>${e.scenario}</td>
-          <td>${e.page}</td>
-          <td>${e.apiName}</td>
-          <td>${e.status}</td>
-          <td>${e.url}</td>
-          <td>${e.errorCode}</td>
-          <td>${e.errorMessage}</td>
-        </tr>
-      `).join('')}
-    </tbody>
-  </table>
+    `;
+  }).join('\n');
 
-  <script>
-    ${Object.values(apiStats).map(api => `
-      new Chart(document.getElementById("chart-${api.name}-duration"), {
+  const charts = Object.entries(grouped).map(([key, data], index) => {
+    return `
+    <h4>${key}</h4>
+    <canvas id="chart_${index}" height="100"></canvas>
+    <script>
+      const ctx_${index} = document.getElementById('chart_${index}');
+      new Chart(ctx_${index}, {
         type: 'line',
         data: {
-          labels: [...Array(${api.durations.length}).keys()],
+          labels: [...Array(${data.durations.length}).keys()],
           datasets: [{
             label: 'Duration (ms)',
-            data: ${JSON.stringify(api.durations)},
-            borderColor: 'blue',
-            fill: false
+            data: ${JSON.stringify(data.durations)},
+            borderColor: 'rgba(75, 192, 192, 1)',
+            fill: false,
+            tension: 0.3
           }]
         },
         options: {
           responsive: true,
-          plugins: { title: { display: true, text: '${api.name} - Duration' } }
+          plugins: {
+            title: {
+              display: false
+            }
+          }
         }
       });
+    </script>
+    `;
+  }).join('\n');
 
-      new Chart(document.getElementById("chart-${api.name}-vu"), {
-        type: 'scatter',
-        data: {
-          datasets: [{
-            label: 'VU vs Duration',
-            data: ${JSON.stringify(api.vus.map((vu, i) => ({ x: vu, y: api.durations[i] })))},
-            backgroundColor: 'orange'
-          }]
-        },
-        options: {
-          scales: {
-            x: { title: { display: true, text: 'VU' } },
-            y: { title: { display: true, text: 'Duration (ms)' } }
-          },
-          plugins: { title: { display: true, text: '${api.name} - VU vs Duration' } }
-        }
-      });
-    `).join('')}
-  </script>
-</body>
-</html>
-`;
+  return `
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <meta charset="utf-8" />
+    <title>k6 Performance Test Report</title>
+    ${chartJsCdn}
+    <style>
+      body { font-family: Arial; padding: 20px; }
+      table { border-collapse: collapse; width: 100%; margin-bottom: 40px; }
+      th, td { border: 1px solid #ccc; padding: 8px; }
+      th { background-color: #f4f4f4; }
+      canvas { max-width: 100%; }
+    </style>
+  </head>
+  <body>
+    <h1>Performance Test Report</h1>
+    <table>
+      <thead>
+        <tr>
+          <th>API Name</th>
+          <th>Method</th>
+          <th>URL</th>
+          <th>Count</th>
+          <th>Avg Duration</th>
+          <th>Errors</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows}
+      </tbody>
+    </table>
 
-fs.writeFileSync('./report.html', html, 'utf-8');
-console.log('✅ Report generated: report.html');
+    <h2>Response Time Charts</h2>
+    ${charts}
+  </body>
+  </html>
+  `;
+}
+
+(async () => {
+  await parseJsonLines();
+  const grouped = groupByApi(records);
+  const html = generateHtml(grouped);
+  fs.writeFileSync(outputHtml, html, 'utf-8');
+  console.log(`✅ 报告已生成: ${outputHtml}`);
+})();
