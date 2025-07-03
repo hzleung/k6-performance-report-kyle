@@ -1,12 +1,11 @@
-// generateReport.js
 import fs from 'fs';
 import readline from 'readline';
-import path from 'path';
 
-const logFile = 'results.json'; // k6 --out json=results.json
+const logFile = 'results.json';
 const outputHtml = 'report.html';
 
-const records = [];
+const apiRecords = [];
+const scenarioRecords = [];
 
 async function parseJsonLines() {
   const rl = readline.createInterface({
@@ -20,25 +19,56 @@ async function parseJsonLines() {
       const json = JSON.parse(line);
       if (json.type === 'Point' && json.metric === 'http_req_duration') {
         const tags = json.data.tags;
-        records.push({
+        const record = {
           name: tags.name || 'unknown',
-          method: tags.method,
-          url: tags.url,
+          method: tags.method || 'GET',
+          url: tags.url || 'unknown',
           status: tags.status || 'unknown',
-          duration: json.data.value, // in ms
-          uvs: parseInt(tags.vu) || 0,
+          duration: json.data.value,
+          vu: parseInt(tags.vu) || 0,
+          scenario: tags.scenarioName || 'unknown',
+          page: tags.pageName || 'unknown',
           error: tags.error || null
+        };
+        apiRecords.push(record);
+        scenarioRecords.push({
+          scenario: record.scenario,
+          duration: record.duration,
+          status: record.status,
+          error: record.error
         });
       }
-    } catch (err) {
-      console.error('解析失败:', err.message);
+    } catch (e) {
+      console.warn('JSON parse error:', e.message);
     }
   }
 }
 
+function groupByScenario(records) {
+  const grouped = {};
+  for (const rec of records) {
+    if (!grouped[rec.scenario]) {
+      grouped[rec.scenario] = {
+        count: 0,
+        durations: [],
+        errors: []
+      };
+    }
+    grouped[rec.scenario].count += 1;
+    grouped[rec.scenario].durations.push(rec.duration);
+    if (rec.status !== '200') {
+      grouped[rec.scenario].errors.push({
+        status: rec.status,
+        error: rec.error || 'Unknown error',
+        duration: rec.duration
+      });
+    }
+  }
+  return grouped;
+}
+
 function groupByApi(records) {
   const grouped = {};
-
   for (const rec of records) {
     const key = `${rec.method} ${rec.url}`;
     if (!grouped[key]) {
@@ -48,7 +78,7 @@ function groupByApi(records) {
         url: rec.url,
         count: 0,
         durations: [],
-        errors: [],
+        errors: []
       };
     }
     grouped[key].count += 1;
@@ -61,18 +91,29 @@ function groupByApi(records) {
       });
     }
   }
-
   return grouped;
 }
 
-function generateHtml(grouped) {
+function generateHtml(apiGrouped, scenarioGrouped) {
   const chartJsCdn = `<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>`;
-  const rows = Object.entries(grouped).map(([key, data], index) => {
+
+  const scenarioTable = Object.entries(scenarioGrouped).map(([name, data], index) => {
+    const avg = (data.durations.reduce((a, b) => a + b, 0) / data.durations.length).toFixed(2);
+    return `
+      <tr>
+        <td>${name}</td>
+        <td>${data.count}</td>
+        <td>${avg} ms</td>
+        <td>${data.errors.length}</td>
+      </tr>
+    `;
+  }).join('\n');
+
+  const apiTable = Object.entries(apiGrouped).map(([key, data], index) => {
     const avg = (data.durations.reduce((a, b) => a + b, 0) / data.durations.length).toFixed(2);
     const errorBlock = data.errors.length
       ? `<details><summary>${data.errors.length} error(s)</summary><pre>${data.errors.map(e => JSON.stringify(e, null, 2)).join('\n\n')}</pre></details>`
       : '✅ No errors';
-
     return `
       <tr>
         <td>${data.name}</td>
@@ -85,31 +126,50 @@ function generateHtml(grouped) {
     `;
   }).join('\n');
 
-  const charts = Object.entries(grouped).map(([key, data], index) => {
+  const scenarioCharts = Object.entries(scenarioGrouped).map(([name, data], index) => {
     return `
-    <h4>${key}</h4>
-    <canvas id="chart_${index}" height="100"></canvas>
+    <h3>${name}</h3>
+    <canvas id="scenario_chart_${index}" height="100"></canvas>
     <script>
-      const ctx_${index} = document.getElementById('chart_${index}');
-      new Chart(ctx_${index}, {
+      new Chart(document.getElementById('scenario_chart_${index}'), {
+        type: 'bar',
+        data: {
+          labels: [...Array(${data.durations.length}).keys()],
+          datasets: [{
+            label: 'Duration (ms)',
+            data: ${JSON.stringify(data.durations)},
+            backgroundColor: 'rgba(153, 102, 255, 0.6)'
+          }]
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { display: false } }
+        }
+      });
+    </script>
+    `;
+  }).join('\n');
+
+  const apiCharts = Object.entries(apiGrouped).map(([key, data], index) => {
+    return `
+    <h3>${key}</h3>
+    <canvas id="api_chart_${index}" height="100"></canvas>
+    <script>
+      new Chart(document.getElementById('api_chart_${index}'), {
         type: 'line',
         data: {
           labels: [...Array(${data.durations.length}).keys()],
           datasets: [{
             label: 'Duration (ms)',
             data: ${JSON.stringify(data.durations)},
-            borderColor: 'rgba(75, 192, 192, 1)',
+            borderColor: 'rgba(54, 162, 235, 1)',
             fill: false,
             tension: 0.3
           }]
         },
         options: {
           responsive: true,
-          plugins: {
-            title: {
-              display: false
-            }
-          }
+          plugins: { legend: { display: false } }
         }
       });
     </script>
@@ -120,19 +180,37 @@ function generateHtml(grouped) {
   <!DOCTYPE html>
   <html>
   <head>
-    <meta charset="utf-8" />
-    <title>k6 Performance Test Report</title>
+    <meta charset="utf-8">
+    <title>k6 Performance Report</title>
     ${chartJsCdn}
     <style>
-      body { font-family: Arial; padding: 20px; }
-      table { border-collapse: collapse; width: 100%; margin-bottom: 40px; }
-      th, td { border: 1px solid #ccc; padding: 8px; }
-      th { background-color: #f4f4f4; }
-      canvas { max-width: 100%; }
+      body { font-family: "Segoe UI", sans-serif; padding: 2rem; background: #f9f9f9; color: #333; }
+      h1, h2, h3 { color: #222; }
+      table { width: 100%; border-collapse: collapse; margin-bottom: 2rem; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 6px rgba(0,0,0,0.05); }
+      th, td { padding: 12px; border-bottom: 1px solid #eee; text-align: left; }
+      th { background: #f4f4f4; font-weight: 600; }
+      details { background: #fef4f4; border: 1px solid #f9c6c9; border-radius: 4px; padding: 8px; }
+      canvas { background: #fff; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.05); margin-bottom: 30px; }
     </style>
   </head>
   <body>
-    <h1>Performance Test Report</h1>
+    <h1>🚀 K6 Performance Report</h1>
+
+    <h2>📊 Scenario Statistics</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Scenario</th>
+          <th>Request Count</th>
+          <th>Avg Duration</th>
+          <th>Error Count</th>
+        </tr>
+      </thead>
+      <tbody>${scenarioTable}</tbody>
+    </table>
+    ${scenarioCharts}
+
+    <h2>🔍 API Statistics</h2>
     <table>
       <thead>
         <tr>
@@ -144,22 +222,21 @@ function generateHtml(grouped) {
           <th>Errors</th>
         </tr>
       </thead>
-      <tbody>
-        ${rows}
-      </tbody>
+      <tbody>${apiTable}</tbody>
     </table>
+    ${apiCharts}
 
-    <h2>Response Time Charts</h2>
-    ${charts}
   </body>
   </html>
   `;
 }
 
+// 主执行
 (async () => {
   await parseJsonLines();
-  const grouped = groupByApi(records);
-  const html = generateHtml(grouped);
+  const scenarioGrouped = groupByScenario(scenarioRecords);
+  const apiGrouped = groupByApi(apiRecords);
+  const html = generateHtml(apiGrouped, scenarioGrouped);
   fs.writeFileSync(outputHtml, html, 'utf-8');
-  console.log(`✅ 报告已生成: ${outputHtml}`);
+  console.log(`✅ 报告生成成功：${outputHtml}`);
 })();
