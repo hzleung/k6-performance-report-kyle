@@ -1,201 +1,168 @@
 import fs from 'fs';
+import path from 'path';
 
-const logFilePath = 'result.jsonl';
-const rawData = fs.readFileSync(logFilePath, 'utf-8');
-const lines = rawData.trim().split('\n');
+const INPUT_FILE = './results.json';
+const OUTPUT_FILE = './report.html';
+
+const raw = fs.readFileSync(INPUT_FILE, 'utf8');
+const entries = JSON.parse(raw);
 
 const apiData = [];
+
 const scenarioStats = {};
 
-for (const line of lines) {
-  const entry = JSON.parse(line);
-  if (entry.type !== 'Point' || entry.metric !== 'http_req_duration') continue;
+entries.forEach(entry => {
+  if (entry.type !== 'Point' || entry.metric !== 'http_req_duration') return;
 
-  const tags = entry.tags;
-  const value = entry.value;
+  const { tags = {}, value, time } = entry;
+  const {
+    name = '',
+    url = '',
+    method = '',
+    status = '',
+    scenario = 'unknown',
+    group = ''
+  } = tags;
 
-  const record = {
-    scenario: tags.scenario,
-    apiName: tags.name,
-    url: tags.url,
-    method: tags.method || '',
-    status: tags.status || '',
-    duration: value,
-    error_code: tags['error_code'] || null,
-    error_message: tags['error_message'] || null,
-    vu: tags.vu
-  };
+  if (scenario === 'setup') return;
 
-  apiData.push(record);
+  const apiName = name || url;
+  const duration = value;
 
-  if (!scenarioStats[record.scenario]) {
-    scenarioStats[record.scenario] = {
-      scenario: record.scenario,
-      durations: [],
-      count: 0,
-      failed: 0
-    };
+  apiData.push({
+    scenario,
+    page: group || 'unknown',
+    name: apiName,
+    url,
+    method,
+    status,
+    duration: duration.toFixed(2),
+    timestamp: new Date(time * 1000).toLocaleString(),
+    error: status >= 400 ? `Status: ${status}` : ''
+  });
+
+  if (!scenarioStats[scenario]) {
+    scenarioStats[scenario] = [];
   }
+  scenarioStats[scenario].push(duration);
+});
 
-  scenarioStats[record.scenario].durations.push(value);
-  scenarioStats[record.scenario].count++;
+const html = generateHTML(apiData, scenarioStats);
+fs.writeFileSync(OUTPUT_FILE, html, 'utf8');
+console.log('✅ Report saved to', OUTPUT_FILE);
 
-  if (record.status !== '200') {
-    scenarioStats[record.scenario].failed++;
-  }
-}
+function generateHTML(apiData, scenarioStats) {
+  const scenarioLabels = Object.keys(scenarioStats);
+  const scenarioDurations = scenarioLabels.map(s => {
+    const durations = scenarioStats[s];
+    const avg = durations.reduce((a, b) => a + b, 0) / durations.length;
+    return avg.toFixed(2);
+  });
 
-const html = `
+  return `
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-  <meta charset="UTF-8" />
-  <title>K6 Performance Report</title>
+  <meta charset="UTF-8">
+  <title>Performance Report</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
     body {
       font-family: Arial, sans-serif;
-      padding: 20px;
+      margin: 30px;
       background: #f9f9f9;
     }
-    h2 { color: #2c3e50; }
+    h1, h2 {
+      text-align: center;
+    }
     table {
-      border-collapse: collapse;
       width: 100%;
-      margin-bottom: 30px;
+      border-collapse: collapse;
+      background: #fff;
+      margin-top: 30px;
     }
     th, td {
       border: 1px solid #ccc;
-      padding: 6px 10px;
+      padding: 8px 10px;
       font-size: 14px;
     }
     th {
-      background-color: #f0f0f0;
+      background: #eee;
     }
     .chart-container {
-      margin: 40px 0;
+      width: 80%;
+      margin: 40px auto;
+    }
+    .error {
+      color: red;
     }
   </style>
 </head>
 <body>
-  <h1>K6 Performance Testing Report</h1>
+  <h1>Performance Test Report</h1>
 
-  <h2>📊 Scenario Overview</h2>
+  <div class="chart-container">
+    <canvas id="scenarioChart"></canvas>
+  </div>
+
+  <h2>API Request Details</h2>
   <table>
     <thead>
       <tr>
         <th>Scenario</th>
-        <th>Requests</th>
-        <th>Failures</th>
-        <th>Failure Rate</th>
-        <th>Avg Duration (ms)</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${Object.values(scenarioStats).map(s => {
-  const avg = (s.durations.reduce((a, b) => a + b, 0) / s.durations.length).toFixed(2);
-  const failRate = ((s.failed / s.count) * 100).toFixed(2);
-  return `<tr>
-          <td>${s.scenario}</td>
-          <td>${s.count}</td>
-          <td>${s.failed}</td>
-          <td>${failRate}%</td>
-          <td>${avg}</td>
-        </tr>`;
-}).join('')}
-    </tbody>
-  </table>
-
-  <h2>📋 API Call Details</h2>
-  <table>
-    <thead>
-      <tr>
-        <th>Scenario</th>
+        <th>Page</th>
         <th>API Name</th>
-        <th>Method</th>
         <th>URL</th>
+        <th>Method</th>
         <th>Status</th>
         <th>Duration (ms)</th>
-        <th>Error Code</th>
-        <th>Error Message</th>
+        <th>Time</th>
+        <th>Error</th>
       </tr>
     </thead>
     <tbody>
       ${apiData.map(d => `
         <tr>
           <td>${d.scenario}</td>
-          <td>${d.apiName}</td>
-          <td>${d.method}</td>
+          <td>${d.page}</td>
+          <td>${d.name}</td>
           <td>${d.url}</td>
+          <td>${d.method}</td>
           <td>${d.status}</td>
           <td>${d.duration}</td>
-          <td>${d.error_code || ''}</td>
-          <td>${d.error_message || ''}</td>
-        </tr>`).join('')}
+          <td>${d.timestamp}</td>
+          <td class="error">${d.error}</td>
+        </tr>
+      `).join('')}
     </tbody>
   </table>
 
-  <h2>📈 UVs vs Avg Duration per Scenario</h2>
-  <div class="chart-container">
-    <canvas id="uvTrendChart"></canvas>
-  </div>
-
   <script>
-    const chartData = ${JSON.stringify(apiData)};
-
-    const trendMap = {};
-    chartData.forEach(row => {
-      const key = row.scenario + '-' + row.vu;
-      if (!trendMap[key]) trendMap[key] = [];
-      trendMap[key].push(row.duration);
-    });
-
-    const trendLabels = [];
-    const trendDatasets = {};
-    for (const key in trendMap) {
-      const [scenario, vu] = key.split('-');
-      if (!trendDatasets[scenario]) trendDatasets[scenario] = {};
-      if (!trendDatasets[scenario][vu]) trendDatasets[scenario][vu] = [];
-
-      trendDatasets[scenario][vu].push(...trendMap[key]);
-      if (!trendLabels.includes(vu)) trendLabels.push(vu);
-    }
-
-    const trendChartDatasets = Object.entries(trendDatasets).map(([scenario, vus]) => {
-      const data = trendLabels.map(vu => {
-        const durations = vus[vu] || [];
-        const avg = durations.reduce((a, b) => a + b, 0) / (durations.length || 1);
-        return avg.toFixed(2);
-      });
-      return {
-        label: scenario,
-        data,
-        borderWidth: 2,
-        fill: false,
-        tension: 0.3
-      };
-    });
-
-    new Chart(document.getElementById('uvTrendChart'), {
-      type: 'line',
+    const ctx = document.getElementById('scenarioChart').getContext('2d');
+    new Chart(ctx, {
+      type: 'bar',
       data: {
-        labels: trendLabels,
-        datasets: trendChartDatasets
+        labels: ${JSON.stringify(scenarioLabels)},
+        datasets: [{
+          label: 'Average Response Time (ms)',
+          data: ${JSON.stringify(scenarioDurations)},
+          backgroundColor: 'rgba(54, 162, 235, 0.6)',
+          borderColor: 'rgba(54, 162, 235, 1)',
+          borderWidth: 1
+        }]
       },
       options: {
         responsive: true,
         plugins: {
-          title: {
-            display: true,
-            text: 'Average Duration per Scenario under Different VU (UV) Values'
-          }
+          legend: { display: false }
+        },
+        scales: {
+          y: { beginAtZero: true }
         }
       }
     });
   </script>
 </body>
 </html>
-`;
-
-fs.writeFileSync('report.html', html);
-console.log('✅ Report generated: report.html');
+  `;
+}
