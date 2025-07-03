@@ -4,6 +4,39 @@ import { scenarioConfig } from './src/config/scenarioConfig.js';
 
 let scenarioFunction = {};
 
+const getAmToken = (staffId) => {
+  const url = "https://anycan-staff-dsp/dsp/root/authenticate";
+  const params = {
+    header: {
+      "K-Client-Id": "ANYCAN",
+      "K-Client-Secret": "anycan@123",
+      "K-Open-Username": staffId,
+    },
+    withCredentials: true,
+    credentials: "include"
+  }
+  const res = http.post(url, null, params);
+  if (res.status !== 200) {
+    console.error("Fetch Error token.");
+    throw new Error("Failed to fetch token.")
+  }
+  try {
+    const tokenValue = JSON.parse(res.body).tokenId;
+    if (!tokenValue) {
+      throw new Error("tokenId is missing in the response.")
+    }
+    return tokenValue;
+  } catch (error) {
+    console.error(`Error parsing token response: ${error.message}`);
+    throw error;
+  }
+}
+
+export function setup() {
+  const token = getAmToken("123456789");
+  return { token }
+}
+
 export const options = {
   scenarios: generateScenarios(
     scenarioConfig.scenarios,
