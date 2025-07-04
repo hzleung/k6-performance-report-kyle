@@ -29,7 +29,7 @@ async function parseJsonLines() {
           duration: json.data.value,
           vu: parseInt(tags.vu) || 0,
           scenario: tags.scenario || 'unknown',
-          page: tags.page || 'unknown',
+          page: tags.pageName || 'unknown',
           error: tags.error || null
         };
         apiRecords.push(record);
@@ -99,31 +99,54 @@ function groupByApi(records) {
 function generateHtml(apiGrouped, scenarioGrouped) {
   const chartJsCdn = `<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>`;
 
-  const scenarioTable = Object.entries(scenarioGrouped).map(([name, data]) => {
+  const scenarioTable = Object.entries(scenarioGrouped).map(([name, data], index) => {
     const avg = (data.durations.reduce((a, b) => a + b, 0) / data.durations.length).toFixed(2);
     return `
-      <tr>
+      <tr class="scenario-row" data-index="${index}">
         <td>${name}</td>
         <td>${data.count}</td>
         <td>${avg} ms</td>
         <td>${data.errors.length}</td>
       </tr>
+      <tr class="scenario-chart-row" style="display:none;">
+        <td colspan="4">
+          <canvas id="scenario_chart_${index}" height="100"></canvas>
+        </td>
+      </tr>
     `;
   }).join('\n');
 
-  let apiTableRows = '';
-  let apiChartScripts = '';
-  let chartIndex = 0;
+  const scenarioCharts = Object.entries(scenarioGrouped).map(([name, data], index) => {
+    return `
+    new Chart(document.getElementById('scenario_chart_${index}'), {
+      type: 'bar',
+      data: {
+        labels: [...Array(${data.durations.length}).keys()],
+        datasets: [{
+          label: 'Duration (ms)',
+          data: ${JSON.stringify(data.durations)},
+          backgroundColor: 'rgba(153, 102, 255, 0.6)'
+        }]
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { title: { display: true, text: 'Request Index' } },
+          y: { title: { display: true, text: 'Duration (ms)' } }
+        }
+      }
+    });
+    `;
+  }).join('\n');
 
-  for (const [key, data] of Object.entries(apiGrouped)) {
+  const apiTable = Object.entries(apiGrouped).map(([key, data], index) => {
     const avg = (data.durations.reduce((a, b) => a + b, 0) / data.durations.length).toFixed(2);
     const errorBlock = data.errors.length
       ? `<details><summary>${data.errors.length} error(s)</summary><pre>${data.errors.map(e => JSON.stringify(e, null, 2)).join('\n\n')}</pre></details>`
       : '✅ No errors';
-
-    const chartId = `api_chart_${chartIndex}`;
-    apiTableRows += `
-      <tr class="api-row" onclick="toggleChart('${chartId}')">
+    return `
+      <tr class="api-row" data-index="${index}">
         <td>${data.name}</td>
         <td>${data.method}</td>
         <td>${data.url}</td>
@@ -131,56 +154,37 @@ function generateHtml(apiGrouped, scenarioGrouped) {
         <td>${avg} ms</td>
         <td>${errorBlock}</td>
       </tr>
-      <tr id="${chartId}_row" class="chart-row" style="display:none;">
+      <tr class="api-chart-row" style="display:none;">
         <td colspan="6">
-          <canvas id="${chartId}" height="100"></canvas>
+          <canvas id="api_chart_${index}" height="100"></canvas>
         </td>
       </tr>
     `;
+  }).join('\n');
 
-    apiChartScripts += `
-      new Chart(document.getElementById('${chartId}'), {
-        type: 'line',
-        data: {
-          labels: [...Array(${data.durations.length}).keys()],
-          datasets: [{
-            label: 'Duration (ms)',
-            data: ${JSON.stringify(data.durations)},
-            borderColor: 'rgba(75, 192, 192, 1)',
-            fill: false,
-            tension: 0.3
-          }]
-        },
-        options: {
-          responsive: true,
-          plugins: { legend: { display: false } }
-        }
-      });
-    `;
-    chartIndex++;
-  }
-
-  const scenarioCharts = Object.entries(scenarioGrouped).map(([name, data], index) => {
+  const apiCharts = Object.entries(apiGrouped).map(([key, data], index) => {
     return `
-    <h3>${name}</h3>
-    <canvas id="scenario_chart_${index}" height="100"></canvas>
-    <script>
-      new Chart(document.getElementById('scenario_chart_${index}'), {
-        type: 'bar',
-        data: {
-          labels: [...Array(${data.durations.length}).keys()],
-          datasets: [{
-            label: 'Duration (ms)',
-            data: ${JSON.stringify(data.durations)},
-            backgroundColor: 'rgba(153, 102, 255, 0.6)'
-          }]
-        },
-        options: {
-          responsive: true,
-          plugins: { legend: { display: false } }
+    new Chart(document.getElementById('api_chart_${index}'), {
+      type: 'line',
+      data: {
+        labels: [...Array(${data.durations.length}).keys()],
+        datasets: [{
+          label: 'Duration (ms)',
+          data: ${JSON.stringify(data.durations)},
+          borderColor: 'rgba(54, 162, 235, 1)',
+          fill: false,
+          tension: 0.3
+        }]
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { title: { display: true, text: 'Request Index' } },
+          y: { title: { display: true, text: 'Duration (ms)' } }
         }
-      });
-    </script>
+      }
+    });
     `;
   }).join('\n');
 
@@ -198,20 +202,9 @@ function generateHtml(apiGrouped, scenarioGrouped) {
       th, td { padding: 12px; border-bottom: 1px solid #eee; text-align: left; }
       th { background: #f4f4f4; font-weight: 600; }
       details { background: #fef4f4; border: 1px solid #f9c6c9; border-radius: 4px; padding: 8px; }
-      .api-row { cursor: pointer; }
-      .chart-row td { padding: 0 12px 12px; background: #fafafa; }
-      canvas { background: #fff; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.05); }
+      canvas { background: #fff; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.05); margin: 10px 0; }
+      tr:hover { background: #f1f1f1; cursor: pointer; }
     </style>
-    <script>
-      function toggleChart(chartId) {
-        const row = document.getElementById(chartId + '_row');
-        row.style.display = row.style.display === 'none' ? '' : 'none';
-      }
-
-      window.onload = function() {
-        ${apiChartScripts}
-      }
-    </script>
   </head>
   <body>
     <h1>🚀 K6 Performance Report</h1>
@@ -228,7 +221,6 @@ function generateHtml(apiGrouped, scenarioGrouped) {
       </thead>
       <tbody>${scenarioTable}</tbody>
     </table>
-    ${scenarioCharts}
 
     <h2>🔍 API Statistics</h2>
     <table>
@@ -242,8 +234,29 @@ function generateHtml(apiGrouped, scenarioGrouped) {
           <th>Errors</th>
         </tr>
       </thead>
-      <tbody>${apiTableRows}</tbody>
+      <tbody>${apiTable}</tbody>
     </table>
+
+    <script>
+      document.querySelectorAll('.api-row').forEach(row => {
+        row.addEventListener('click', () => {
+          const index = row.getAttribute('data-index');
+          const chartRow = document.querySelectorAll('.api-chart-row')[index];
+          chartRow.style.display = chartRow.style.display === 'none' ? 'table-row' : 'none';
+        });
+      });
+
+      document.querySelectorAll('.scenario-row').forEach(row => {
+        row.addEventListener('click', () => {
+          const index = row.getAttribute('data-index');
+          const chartRow = document.querySelectorAll('.scenario-chart-row')[index];
+          chartRow.style.display = chartRow.style.display === 'none' ? 'table-row' : 'none';
+        });
+      });
+
+      ${apiCharts}
+      ${scenarioCharts}
+    </script>
   </body>
   </html>
   `;
