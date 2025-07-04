@@ -21,10 +21,10 @@ async function parseJsonLines() {
       const json = JSON.parse(line);
       if (json.type === 'Point' && json.metric === 'http_req_duration') {
         const tags = json.data.tags;
-        if (tags.scenarioName === 'setup') continue; // 排除 setup
+        if (tags.scenarioName === 'setup') continue;
 
         const record = {
-          name: tags.name || 'unknown',
+          name: tags.apiName || 'unknown',
           method: tags.method || 'GET',
           url: tags.url || 'unknown',
           status: tags.status || 'unknown',
@@ -215,9 +215,65 @@ function makeChartScripts(grouped, chartPrefix, color, labelText) {
   `).join('\n');
 }
 
-function generateHtml(apiGrouped, scenarioGrouped, pageGrouped, trendData) {
+function groupByVuOverTime(records) {
+  const grouped = {};
+  for (const rec of records) {
+    const vu = rec.vu || 0;
+    const timeKey = Math.floor(rec.timestamp / 1000);
+    if (!grouped[vu]) grouped[vu] = {};
+    if (!grouped[vu][timeKey]) {
+      grouped[vu][timeKey] = { durations: [], count: 0 };
+    }
+    grouped[vu][timeKey].durations.push(rec.duration);
+    grouped[vu][timeKey].count++;
+  }
+
+  const vuTrend = {};
+  for (const vu in grouped) {
+    const timePoints = Object.keys(grouped[vu]).sort((a, b) => a - b);
+    vuTrend[vu] = timePoints.map(tp => {
+      const data = grouped[vu][tp];
+      const avg = data.durations.reduce((a, b) => a + b, 0) / data.count;
+      return { time: parseInt(tp) * 1000, avgDuration: avg };
+    });
+  }
+  return vuTrend;
+}
+
+function prepareVuTrendChartData(vuTrend) {
+  const allTimesSet = new Set();
+  for (const vu in vuTrend) {
+    vuTrend[vu].forEach(point => allTimesSet.add(point.time));
+  }
+  const allTimes = Array.from(allTimesSet).sort((a, b) => a - b);
+  const labels = allTimes.map(ts => {
+    const d = new Date(ts);
+    return d.toISOString().split('T')[1].slice(0, 8);
+  });
+
+  const colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown'];
+
+  const datasets = Object.entries(vuTrend).map(([vu, points], i) => {
+    const map = {};
+    points.forEach(p => { map[p.time] = p.avgDuration; });
+    const data = allTimes.map(t => map[t] ?? null);
+    return {
+      label: `VU ${vu}`,
+      data,
+      borderColor: colors[i % colors.length],
+      tension: 0.3,
+      fill: false,
+      spanGaps: true
+    };
+  });
+
+  return { labels, datasets };
+}
+
+function generateHtml(apiGrouped, scenarioGrouped, pageGrouped, trendData, vuTrend) {
   const trendLabels = trendData.map(d => formatTimestamp(d.time));
   const trendDurations = trendData.map(d => d.duration);
+  const vuTrendData = prepareVuTrendChartData(vuTrend);
 
   return `
   <!DOCTYPE html>
@@ -247,38 +303,63 @@ function generateHtml(apiGrouped, scenarioGrouped, pageGrouped, trendData) {
     <h2>⏱️ API Trend Over Time</h2>
     <canvas id="trendChart" height="120"></canvas>
 
-    <script>
-      ${makeChartScripts(scenarioGrouped, "scenario", 'rgba(255, 99, 132, 1)', 'Scenario Duration (ms)')}
-      ${makeChartScripts(pageGrouped, "page", 'rgba(255, 159, 64, 1)', 'Page Duration (ms)')}
-      ${makeChartScripts(apiGrouped, "api", 'rgba(54, 162, 235, 1)', 'API Duration (ms)')}
+    <h2>👥 VU Response Time Comparison</h2>
+    <canvas id="vuTrendChart" height="120"></canvas>
 
-      new Chart(document.getElementById("trendChart"), {
+    <script>
+      document.querySelectorAll('tr.toggle-chart').forEach(tr => {
+        tr.addEventListener('click', () => {
+          const targetId = tr.getAttribute('data-target');
+          const chartRow = document.getElementById(targetId);
+          if (!chartRow) return;
+          if (chartRow.style.display === 'table-row') {
+            chartRow.style.display = 'none';
+          } else {
+            chartRow.style.display = 'table-row';
+          }
+        });
+      });
+
+      ${makeChartScripts(scenarioGrouped, 'scenario', 'blue', 'Duration (ms)')}
+      ${makeChartScripts(pageGrouped, 'page', 'green', 'Duration (ms)')}
+      ${makeChartScripts(apiGrouped, 'api', 'red', 'Duration (ms)')}
+
+      new Chart(document.getElementById('trendChart'), {
         type: 'line',
         data: {
           labels: ${JSON.stringify(trendLabels)},
           datasets: [{
-            label: 'API Response Time (ms)',
+            label: 'API Duration',
             data: ${JSON.stringify(trendDurations)},
-            borderColor: 'rgba(75, 192, 192, 1)',
+            borderColor: 'purple',
+            fill: false,
             tension: 0.3,
-            fill: false
+            spanGaps: true
           }]
         },
         options: {
           responsive: true,
           scales: {
-            x: { title: { display: true, text: 'Time (HH:mm:ss)' }},
-            y: { title: { display: true, text: 'Duration (ms)' }}
+            x: { title: { display: true, text: 'Time (HH:mm:ss)' } },
+            y: { title: { display: true, text: 'Duration (ms)' } }
           }
         }
       });
 
-      document.querySelectorAll('.toggle-chart').forEach(row => {
-        row.addEventListener('click', () => {
-          const target = row.dataset.target;
-          const chartRow = document.getElementById(target);
-          chartRow.style.display = chartRow.style.display === 'table-row' ? 'none' : 'table-row';
-        });
+      new Chart(document.getElementById('vuTrendChart'), {
+        type: 'line',
+        data: {
+          labels: ${JSON.stringify(vuTrendData.labels)},
+          datasets: ${JSON.stringify(vuTrendData.datasets)}
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { display: true } },
+          scales: {
+            x: { title: { display: true, text: 'Time (HH:mm:ss)' }},
+            y: { title: { display: true, text: 'Duration (ms)' }}
+          }
+        }
       });
     </script>
   </body>
@@ -287,11 +368,19 @@ function generateHtml(apiGrouped, scenarioGrouped, pageGrouped, trendData) {
 }
 
 (async () => {
+  console.log('Parsing JSON lines...');
   await parseJsonLines();
+
   const scenarioGrouped = groupByField(scenarioRecords, 'scenario');
   const pageGrouped = groupByField(pageRecords, 'page');
   const apiGrouped = groupByApi(apiRecords);
-  const html = generateHtml(apiGrouped, scenarioGrouped, pageGrouped, timeSeries);
+  const vuTrend = groupByVuOverTime(apiRecords);
+
+  const timeSeriesSorted = apiRecords
+    .map(r => ({ time: r.timestamp, duration: r.duration }))
+    .sort((a, b) => a.time - b.time);
+
+  const html = generateHtml(apiGrouped, scenarioGrouped, pageGrouped, timeSeriesSorted, vuTrend);
   fs.writeFileSync(outputHtml, html, 'utf-8');
   console.log(`✅ Report generated: ${outputHtml}`);
 })();
