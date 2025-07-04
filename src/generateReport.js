@@ -21,7 +21,7 @@ async function parseJsonLines() {
       const json = JSON.parse(line);
       if (json.type === 'Point' && json.metric === 'http_req_duration') {
         const tags = json.data.tags;
-        if (tags.scenarioName === 'setup') continue; // 过滤 setup 请求
+        if (tags.scenarioName === 'setup') continue; // 排除 setup
 
         const record = {
           name: tags.name || 'unknown',
@@ -115,83 +115,107 @@ function formatTimestamp(ts) {
   return date.toISOString().split('T')[1].slice(0, 8); // HH:mm:ss
 }
 
-function generateHtml(apiGrouped, scenarioGrouped, pageGrouped, trendData) {
-  const chartJsCdn = `<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>`;
-
-  function makeTable(title, grouped, fieldName, chartPrefix) {
-    if (fieldName === "API") {
-
-    }
+function makeTable(title, grouped, fieldName, chartPrefix) {
+  return `
+    <h2>${title}</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>${fieldName}</th>
+          <th>Count</th>
+          <th>Avg Duration (ms)</th>
+          <th>Error Count</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${Object.entries(grouped).map(([name, data], i) => {
+    const avg = (data.durations.reduce((a, b) => a + b, 0) / data.durations.length).toFixed(2);
     return `
-      <h2>${title}</h2>
-      <table>
-        <thead>
-          <tr>
-            ${fieldName === "API"
-        ? <>
+            <tr class="toggle-chart" data-target="${chartPrefix}_${i}">
+              <td>${name}</td>
+              <td>${data.count}</td>
+              <td>${avg}</td>
+              <td>${data.errors.length}</td>
+            </tr>
+            <tr id="${chartPrefix}_${i}" class="chart-row">
+              <td colspan="4">
+                <canvas id="chart_${chartPrefix}_${i}" height="100"></canvas>
+              </td>
+            </tr>
+          `;
+  }).join('\n')}
+      </tbody>
+    </table>
+  `;
+}
+
+function makeApiTable(apiGrouped) {
+  return `
+    <h2>🔍 API Summary</h2>
+    <table>
+      <thead>
+        <tr>
           <th>API Name</th>
           <th>Method</th>
           <th>URL</th>
-        </>
-        : <>
-          <th>{fieldName}</th>
           <th>Count</th>
-        </>}
-            
-            <th>Avg Duration (ms)</th>
-            <th>Error Count</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${Object.entries(grouped).map(([name, data], i) => {
-          const avg = (data.durations.reduce((a, b) => a + b, 0) / data.durations.length).toFixed(2);
-          return `
-              <tr class="toggle-chart" data-target="${chartPrefix}_${i}">
-                <td>${name}</td>
-                <td>${data.count}</td>
-                <td>${avg}</td>
-                <td>${data.errors.length}</td>
-              </tr>
-              <tr id="${chartPrefix}_${i}" class="chart-row">
-                <td colspan="4">
-                  <canvas id="chart_${chartPrefix}_${i}" height="100"></canvas>
-                </td>
-              </tr>
-            `;
-        }).join('\n')}
-        </tbody>
-      </table>
-    `;
-  }
+          <th>Avg Duration (ms)</th>
+          <th>Error Count</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${Object.entries(apiGrouped).map(([key, data], i) => {
+    const avg = (data.durations.reduce((a, b) => a + b, 0) / data.durations.length).toFixed(2);
+    return `
+            <tr class="toggle-chart" data-target="api_${i}">
+              <td>${data.name}</td>
+              <td>${data.method}</td>
+              <td>${data.url}</td>
+              <td>${data.count}</td>
+              <td>${avg}</td>
+              <td>${data.errors.length}</td>
+            </tr>
+            <tr id="api_${i}" class="chart-row">
+              <td colspan="6">
+                <canvas id="chart_api_${i}" height="100"></canvas>
+              </td>
+            </tr>
+          `;
+  }).join('\n')}
+      </tbody>
+    </table>
+  `;
+}
 
-  function makeChartScripts(grouped, chartPrefix, color, labelText) {
-    return Object.entries(grouped).map(([name, data], i) => `
-      new Chart(document.getElementById("chart_${chartPrefix}_${i}"), {
-        type: 'line',
-        data: {
-          labels: [...Array(${data.durations.length}).keys()],
-          datasets: [{
-            label: '${labelText}',
-            data: ${JSON.stringify(data.durations)},
-            borderColor: '${color}',
-            tension: 0.3,
-            fill: false
-          }]
+function makeChartScripts(grouped, chartPrefix, color, labelText) {
+  return Object.entries(grouped).map(([name, data], i) => `
+    new Chart(document.getElementById("chart_${chartPrefix}_${i}"), {
+      type: 'line',
+      data: {
+        labels: [...Array(${data.durations.length}).keys()],
+        datasets: [{
+          label: '${labelText}',
+          data: ${JSON.stringify(data.durations)},
+          borderColor: '${color}',
+          tension: 0.3,
+          fill: false
+        }]
+      },
+      options: {
+        responsive: true,
+        plugins: {
+          legend: { display: true }
         },
-        options: {
-          responsive: true,
-          plugins: {
-            legend: { display: true }
-          },
-          scales: {
-            x: { title: { display: true, text: 'Request Index' }},
-            y: { title: { display: true, text: 'Duration (ms)' }}
-          }
+        scales: {
+          x: { title: { display: true, text: 'Request Index' }},
+          y: { title: { display: true, text: 'Duration (ms)' }}
         }
-      });
-    `).join('\n');
-  }
+      }
+    });
+  `).join('\n');
+}
 
+function generateHtml(apiGrouped, scenarioGrouped, pageGrouped, trendData) {
   const trendLabels = trendData.map(d => formatTimestamp(d.time));
   const trendDurations = trendData.map(d => d.duration);
 
@@ -201,15 +225,16 @@ function generateHtml(apiGrouped, scenarioGrouped, pageGrouped, trendData) {
   <head>
     <meta charset="utf-8">
     <title>K6 Performance Report</title>
-    ${chartJsCdn}
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
       body { font-family: sans-serif; padding: 2rem; background: #fafafa; }
       table { width: 100%; border-collapse: collapse; margin-bottom: 1rem; }
-      th, td { padding: 10px; border-bottom: 1px solid #ddd; }
+      th, td { padding: 10px; border-bottom: 1px solid #ddd; vertical-align: top; }
       th { background: #f2f2f2; }
       tr.chart-row { display: none; }
       tr.toggle-chart:hover { background: #f9f9f9; cursor: pointer; }
       canvas { background: #fff; border-radius: 4px; margin: 1rem 0; }
+      td:nth-child(3) { word-break: break-word; }
     </style>
   </head>
   <body>
@@ -217,7 +242,7 @@ function generateHtml(apiGrouped, scenarioGrouped, pageGrouped, trendData) {
 
     ${makeTable("📊 Scenario Summary", scenarioGrouped, "Scenario", "scenario")}
     ${makeTable("📄 Page Summary", pageGrouped, "Page", "page")}
-    ${makeTable("🔍 API Summary", apiGrouped, "API", "api")}
+    ${makeApiTable(apiGrouped)}
 
     <h2>⏱️ API Trend Over Time</h2>
     <canvas id="trendChart" height="120"></canvas>
@@ -261,7 +286,6 @@ function generateHtml(apiGrouped, scenarioGrouped, pageGrouped, trendData) {
   `;
 }
 
-// 主执行逻辑
 (async () => {
   await parseJsonLines();
   const scenarioGrouped = groupByField(scenarioRecords, 'scenario');
