@@ -158,12 +158,15 @@ function makeApiTable(apiGrouped) {
           <th>URL</th>
           <th>Count</th>
           <th>Avg Duration (ms)</th>
-          <th>Error Count</th>
+          <th>Errors</th>
         </tr>
       </thead>
       <tbody>
         ${Object.entries(apiGrouped).map(([key, data], i) => {
     const avg = (data.durations.reduce((a, b) => a + b, 0) / data.durations.length).toFixed(2);
+    const errorBlock = data.errors.length
+      ? `<details><summary>${data.errors.length} error(s)</summary><pre>${data.errors.map(e => JSON.stringify(e, null, 2)).join('\n\n')}</pre></details>`
+      : '✅ No errors';
     return `
             <tr class="toggle-chart" data-target="api_${i}">
               <td>${data.name}</td>
@@ -171,7 +174,7 @@ function makeApiTable(apiGrouped) {
               <td>${data.url}</td>
               <td>${data.count}</td>
               <td>${avg}</td>
-              <td>${data.errors.length}</td>
+              <td>${errorBlock}</td>
             </tr>
             <tr id="api_${i}" class="chart-row">
               <td colspan="6">
